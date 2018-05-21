@@ -22,13 +22,13 @@ BATCH_SIZE = 64
 NUM_EPOCHS = 10
 VALIDATION_SIZE = 5000
 SEED = None
-EVAL_BATCH_SIZE = 64
 EVAL_FREQUENCY = 100
 
 def maybe_download(filename):
     if not tf.gfile.Exists(WORK_DIRECTORY):
         tf.gfile.MakeDirs(WORK_DIRECTORY)
     filepath = os.path.join(WORK_DIRECTORY + filename)
+    print(filepath)
     if not tf.gfile.Exists(filepath):
         filepath, _ = urllib.request.urlretrieve(SOURSE_URL+filename, filepath)
         with tf.gfile.GFile(filepath) as f:
@@ -47,7 +47,7 @@ def extract_data(filename, num_images):
     
 def extract_labels(filename, num_labels):
     print('Extracting', filename)
-    with gzip.open(WORK_DIRECTORY + filename) as byte_stream:
+    with gzip.open(filename) as byte_stream:
         byte_stream.read(8)
         buff = byte_stream.read(num_labels)
         labels = np.frombuffer(buff, np.uint8).astype(np.int8)
@@ -63,27 +63,32 @@ def fake_data(num_images):
     return data, labels
 
 def error_rate(predictions, labels):
-    return (100.0 - 100.0*(np.sum(np.argmax(predictions, 1) == labels)) / predictions.shape[0])
+    return (100.0 - 100.0*(np.sum(np.argmax(predictions, 1) == np.argmax(labels, 1))) / predictions.shape[0])
 
-def main():
-    train_data_filename = maybe_download('train-images-idx3-ubyte.gz')
-    train_labels_filename = maybe_download('train-labels-idx-ubyte.gz')
-    test_data_filename = maybe_download('t10k-images-idx3-ubyte.gz')
-    test_labels_filename = maybe_download('t10k-images-idx3-ubyte.gz')
-    
-    train_data = extract_data(train_data_filename, 60000)
-    train_labels = extract_labels(train_labels_filename, 60000)
-    test_data = extract_data(test_data_filename, 10000)
-    test_labels = extract_labels(test_labels_filename, 10000)
-    
-    validation_data = train_data[:VALIDATION_SIZE, ...]
-    validation_labels = train_labels[:VALIDATION_SIZE, ...]
-    train_data = train_data[VALIDATION_SIZE:, ...]
-    train_labels = train_labels[VALIDATION_SIZE:, ...]
-    
-    train_data_node = tf.placeholder(tf.float32, [BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, NUM_CHANNELS])
-    train_labels_node = tf.placeholder(tf.int64, [BATCH_SIZE, 1])
-    
+def one_hot(labels):
+    return (np.arange(10) == np.array(labels).reshape([-1, 1]))
+
+train_data_filename = maybe_download('train-images-idx3-ubyte.gz')
+train_labels_filename = maybe_download('train-labels-idx1-ubyte.gz')
+test_data_filename = maybe_download('t10k-images-idx3-ubyte.gz')
+test_labels_filename = maybe_download('t10k-labels-idx1-ubyte.gz')
+
+train_data = extract_data(train_data_filename, 60000)
+train_labels = one_hot(extract_labels(train_labels_filename, 60000))
+print(train_labels)
+test_data = extract_data(test_data_filename, 10000)
+test_labels = extract_labels(test_labels_filename, 10000)
+
+validation_data = train_data[:VALIDATION_SIZE, ...]
+validation_labels = train_labels[:VALIDATION_SIZE, ...]
+train_data = train_data[VALIDATION_SIZE:, ...]
+train_labels = train_labels[VALIDATION_SIZE:, ...]
+
+graph = tf.Graph()
+dropout = True
+with graph.as_default():    
+    x = tf.placeholder(tf.float32, [None, IMAGE_SIZE, IMAGE_SIZE, NUM_CHANNELS])
+    y = tf.placeholder(tf.int64, [None, NUM_LABELS])
     conv1_weights = tf.Variable(tf.truncated_normal([5, 5, NUM_CHANNELS, 32], stddev=0.1))
     conv1_biases = tf.Variable(tf.zeros([32]))
     conv2_weights = tf.Variable(tf.truncated_normal([5, 5, 32, 64], stddev=0.1))
@@ -91,11 +96,53 @@ def main():
     fc1_weights = tf.Variable(tf.truncated_normal([IMAGE_SIZE // 4 *IMAGE_SIZE // 4 * 64, 512], stddev=0.1))
     fc1_biases = tf.Variable(tf.constant(0.1, shape=[512]))
     fc2_weights = tf.Variable(tf.truncated_normal([512, NUM_LABELS], stddev=0.1))
-    fc2_biases = tf.Variable(tf.constant(0.1, shap=[NUM_LABELS]))
+    fc2_biases = tf.Variable(tf.constant(0.1, shape=[NUM_LABELS]))
+        
     
-def model(data, train=False):
-    conv = tf.nn.conv2d(data, conv1_weights, [1, 1, 1, 1], 'SAME')
-    relu = tf.nn.relu()
+    conv = tf.nn.conv2d(x, conv1_weights, [1, 1, 1, 1], 'SAME')
+    relu = tf.nn.relu(tf.nn.bias_add(conv, conv1_biases))
+    pool = tf.nn.max_pool(relu, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
+    conv = tf.nn.conv2d(pool, conv2_weights, [1, 1, 1, 1], 'SAME')
+    relu = tf.nn.relu(tf.nn.bias_add(conv, conv2_biases))
+    pool = tf.nn.max_pool(relu, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
+    shape = pool.get_shape().as_list()
+    reshape = tf.reshape(pool, [-1, shape[1]*shape[2]*shape[3]])
+    hidden = tf.nn.relu(tf.matmul(reshape, fc1_weights) + fc1_biases)
+    if dropout:
+        hidden = tf.nn.dropout(hidden, keep_prob=0.5)
+    logits =  tf.matmul(hidden, fc2_weights) + fc2_biases
+    loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=y, logits=logits))
+
+    regularizers = (tf.nn.l2_loss(fc1_weights) + tf.nn.l2_loss(fc1_biases) + tf.nn.l2_loss(fc2_weights) + tf.nn.l2_loss(fc2_biases))
+    loss += 5e-4 * regularizers
+    batch = tf.Variable(0)
+    learning_rate = tf.train.exponential_decay(0.01, batch*BATCH_SIZE, train_labels.shape[0], 0.95, staircase=True)
+    optimizer = tf.train.MomentumOptimizer(learning_rate, 0.9).minimize(loss, global_step=batch)
+    
+    train_prediction = tf.nn.softmax(logits)
+
+with tf.Session(graph=graph) as sess:
+    tf.global_variables_initializer().run()
+    print('initialized')
+    iteration = train_data.shape[0] // BATCH_SIZE
+    start = 0
+    end = 0
+    for epoch in range(NUM_EPOCHS):
+        for i in range(iteration):
+            end = start + BATCH_SIZE
+            batch_x = train_data[start:end, ...]
+            batch_y = train_labels[start:end, ...]
+            feed_dict = {x:batch_x, y:batch_y}
+            _, losses = sess.run([optimizer, loss], feed_dict=feed_dict)
+            print('step : %d  cost : %.5f' %(i, losses))
+            
+
+
+
+
+
+
+
     
         
 
