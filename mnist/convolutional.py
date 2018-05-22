@@ -9,6 +9,7 @@ import os
 import tensorflow as tf
 import numpy as np
 import gzip
+import time
 
 from six.moves import urllib
 
@@ -62,8 +63,8 @@ def fake_data(num_images):
         labels[image, 0] = label
     return data, labels
 
-def error_rate(predictions, labels):
-    return (100.0 - 100.0*(np.sum(np.argmax(predictions, 1) == np.argmax(labels, 1))) / predictions.shape[0])
+def accu_rate(predictions, labels):
+    return (100.0*(np.sum(np.argmax(predictions, 1) == np.argmax(labels, 1))) / predictions.shape[0])
 
 def one_hot(labels):
     return (np.arange(10) == np.array(labels).reshape([-1, 1]))
@@ -85,10 +86,10 @@ train_data = train_data[VALIDATION_SIZE:, ...]
 train_labels = train_labels[VALIDATION_SIZE:, ...]
 
 graph = tf.Graph()
-dropout = True
 with graph.as_default():    
     x = tf.placeholder(tf.float32, [None, IMAGE_SIZE, IMAGE_SIZE, NUM_CHANNELS])
     y = tf.placeholder(tf.int64, [None, NUM_LABELS])
+    dropout = tf.placeholder(tf.bool)
     conv1_weights = tf.Variable(tf.truncated_normal([5, 5, NUM_CHANNELS, 32], stddev=0.1))
     conv1_biases = tf.Variable(tf.zeros([32]))
     conv2_weights = tf.Variable(tf.truncated_normal([5, 5, 32, 64], stddev=0.1))
@@ -108,49 +109,64 @@ with graph.as_default():
     shape = pool.get_shape().as_list()
     reshape = tf.reshape(pool, [-1, shape[1]*shape[2]*shape[3]])
     hidden = tf.nn.relu(tf.matmul(reshape, fc1_weights) + fc1_biases)
-    if dropout:
+    if dropout is not None:
         hidden = tf.nn.dropout(hidden, keep_prob=0.5)
     logits =  tf.matmul(hidden, fc2_weights) + fc2_biases
     loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=y, logits=logits))
 
     regularizers = (tf.nn.l2_loss(fc1_weights) + tf.nn.l2_loss(fc1_biases) + tf.nn.l2_loss(fc2_weights) + tf.nn.l2_loss(fc2_biases))
     loss += 5e-4 * regularizers
+    correct = tf.equal(tf.argmax(logits, 1), tf.argmax(y, 1))
+    accu = tf.reduce_mean(tf.cast(correct, tf.float32))
     batch = tf.Variable(0)
     learning_rate = tf.train.exponential_decay(0.01, batch*BATCH_SIZE, train_labels.shape[0], 0.95, staircase=True)
     optimizer = tf.train.MomentumOptimizer(learning_rate, 0.9).minimize(loss, global_step=batch)
     
     train_prediction = tf.nn.softmax(logits)
+    
+def eval_in_batches(data, sess):
+    size = data.shape[0]
+    if size <= BATCH_SIZE:
+        raise ValueError('batch size for evaluation larger than dataset: %d' %size)
+    prediction = np.ndarray([size, NUM_LABELS], np.float32)
+    for begin in range(0, size, BATCH_SIZE):
+        end = begin + BATCH_SIZE
+        if end <= size:
+            prediction[begin:end, :] = sess.run(logits, feed_dict={x:data[begin:end, ...], dropout:False})
+        else:
+            prediction[begin:, :] = sess.run(logits, feed_dict={x:data[begin:, ...], dropout:False})
+    return prediction
 
+    
+start_time = time.time()
 with tf.Session(graph=graph) as sess:
     tf.global_variables_initializer().run()
     print('initialized')
-    iteration = train_data.shape[0] // BATCH_SIZE
-    start = 0
-    end = 0
-    for epoch in range(NUM_EPOCHS):
-        for i in range(iteration):
-            end = start + BATCH_SIZE
-            batch_x = train_data[start:end, ...]
-            batch_y = train_labels[start:end, ...]
-            feed_dict = {x:batch_x, y:batch_y}
-            _, losses = sess.run([optimizer, loss], feed_dict=feed_dict)
-            print('step : %d  cost : %.5f' %(i, losses))
+
+    for step in range(NUM_EPOCHS*train_labels.shape[0]//BATCH_SIZE):
+        offset =  (step * BATCH_SIZE) % (train_labels.shape[0] - BATCH_SIZE)
+        batch_x = train_data[offset:(offset+BATCH_SIZE), ...]
+        batch_y = train_labels[offset:(offset+BATCH_SIZE), ...]
+        feed_dict = {x:batch_x, y:batch_y, dropout:True}
+        sess.run(optimizer, feed_dict=feed_dict)
+        
+        if step % EVAL_FREQUENCY == 0:
+            cost, accuracy, lr, prediction = sess.run([loss, accu, learning_rate, train_prediction], feed_dict=feed_dict)
+            elapsed_time = time.time() - start_time
+            print('Step : %d (epoch %.2f), %.1fms' %(step, float(step)*BATCH_SIZE/train_labels.shape[0], 1000*elapsed_time))
+            print('Minibatch loss : %.3f, Learning rate : %.5f' %(cost, lr))
+            print('Minibatch accuracy : %.2f%%' %(accuracy*100))
+            print('Validation accuracy : %.2f%%' %(accu_rate(eval_in_batches(validation_data, sess), validation_labels)))
             
-
-
+    test_accu = accu_rate(eval_in_batches(test_data, sess), test_labels)
+    print('Test accuracy : %.5f%%' %test_accu)
 
 
 
 
 
     
-        
-
-
 if __name__ == '__main__':
     maybe_download('train-images-idx3-ubyte.gz')
     data = extract_data('train-images-idx3-ubyte.gz', 1000)
-    d, l = fake_data(1000)
-    prediction = np.array([[1], [2], [3]])
-    a = error_rate(prediction, [1, 2, 0])
     
