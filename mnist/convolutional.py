@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Created on Wed May 16 23:07:05 2018
+Created on Wed May 23 15:57:20 2018
 
-@author: jiang
+@author: Administrator
 """
 
 import os
@@ -78,7 +78,7 @@ train_data = extract_data(train_data_filename, 60000)
 train_labels = one_hot(extract_labels(train_labels_filename, 60000))
 print(train_labels)
 test_data = extract_data(test_data_filename, 10000)
-test_labels = extract_labels(test_labels_filename, 10000)
+test_labels = one_hot(extract_labels(test_labels_filename, 10000))
 
 validation_data = train_data[:VALIDATION_SIZE, ...]
 validation_labels = train_labels[:VALIDATION_SIZE, ...]
@@ -169,4 +169,3 @@ with tf.Session(graph=graph) as sess:
 if __name__ == '__main__':
     maybe_download('train-images-idx3-ubyte.gz')
     data = extract_data('train-images-idx3-ubyte.gz', 1000)
-    
